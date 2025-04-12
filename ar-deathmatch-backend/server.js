@@ -11,6 +11,11 @@ const io = new Server(httpServer, {
     cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
 });
 
+app.get("/", (req, res) => {
+    res.send("🟢  backend is alive!");
+});
+
+
 const players = {};
 
 io.on("connection", (socket) => {
@@ -65,6 +70,7 @@ io.on("connection", (socket) => {
     });
 });
 
-httpServer.listen(3001, () => {
-    console.log("Server running on http://localhost:3001");
+const PORT = process.env.PORT || 3001;
+httpServer.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });
