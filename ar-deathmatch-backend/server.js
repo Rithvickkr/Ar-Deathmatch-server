@@ -33,6 +33,7 @@ io.on("connection", (socket) => {
   players[socket.id] = { id: socket.id, health: 100, ready: false };
 
   socket.on("joinGame", () => {
+    // Only add player, don't set ready
     const playerList = Object.values(players);
     io.emit("playerUpdate", playerList);
   });
@@ -46,15 +47,15 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("shoot", ({ shooterId, damage, targetId }) => {
-    console.log("Shoot received:", { shooterId, damage, targetId });
-    if (targetId && players[targetId] && players[targetId].health > 0) {
+  socket.on("shoot", ({ shooterId, damage }) => {
+    console.log("Shoot received:", { shooterId, damage });
+    const targetId = Object.keys(players).find((id) => id !== shooterId);
+    if (targetId && players[targetId].health > 0) {
       players[targetId].health -= damage;
       console.log(`Player ${shooterId} shot ${targetId} for ${damage} damage`);
-      // Notify target of damage for blood effect
-      io.to(targetId).emit("damageTaken", { playerId: targetId });
       if (players[targetId].health <= 0) {
         console.log(`Player ${targetId} is dead!`);
+        // Reset ready status for next game
         for (const id in players) {
           players[id].ready = false;
         }
