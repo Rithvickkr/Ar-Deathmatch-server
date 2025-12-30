@@ -107,9 +107,14 @@ io.on("connection", (socket) => {
     socket.join(roomCode);
     
     console.log(`Room ${roomCode} created by ${socket.id}`);
+    console.log(`Host player data:`, rooms[roomCode].players[socket.id]);
     listActiveRooms(); // Debug: show all active rooms
+    
     socket.emit("roomCreated", { roomCode });
-    socket.emit("playerUpdate", Object.values(rooms[roomCode].players));
+    
+    const playersData = Object.values(rooms[roomCode].players);
+    console.log(`Sending initial playerUpdate to host with ${playersData.length} players`);
+    socket.emit("playerUpdate", playersData);
   });
 
   // Handle room joining
@@ -143,9 +148,16 @@ io.on("connection", (socket) => {
     socket.join(roomCode);
     
     console.log(`Player ${socket.id} successfully joined room ${roomCode}`);
+    console.log(`Room ${roomCode} now has players:`, Object.keys(room.players));
+    console.log(`Player data:`, Object.values(room.players));
     listActiveRooms(); // Debug: show all active rooms after join
+    
     socket.emit("roomJoined", { roomCode });
-    io.to(roomCode).emit("playerUpdate", Object.values(room.players));
+    
+    // Send update to all players in the room
+    const playersData = Object.values(room.players);
+    console.log(`Sending playerUpdate to room ${roomCode} with ${playersData.length} players`);
+    io.to(roomCode).emit("playerUpdate", playersData);
   });
 
   socket.on("joinGame", () => {
