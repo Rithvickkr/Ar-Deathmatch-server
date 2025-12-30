@@ -40,6 +40,8 @@ app.get("/", (req, res) => {
 
 const rooms = {}; // Store all game rooms
 const playerRooms = {}; // Track which room each player is in
+const disconnectedPlayers = {}; // Track recently disconnected players for reconnection
+const playerSessions = {}; // Track player session info for reconnection
 
 // Generate a random 6-character room code
 function generateRoomCode() {
@@ -57,13 +59,15 @@ function generateRoomCode() {
 // Clean up empty rooms with more conservative approach
 function cleanupRoom(roomCode) {
   if (rooms[roomCode] && Object.keys(rooms[roomCode].players).length === 0) {
-    // Only clean up rooms that are older than 30 seconds and empty
+    // Only clean up rooms that are older than 2 minutes and empty, unless there are disconnected players
     const roomAge = Date.now() - rooms[roomCode].createdAt;
-    if (roomAge > 30000) { // 30 seconds
+    const hasDisconnectedPlayers = Object.values(disconnectedPlayers).some(p => p.roomCode === roomCode);
+    
+    if (roomAge > 120000 && !hasDisconnectedPlayers) { // 2 minutes
       delete rooms[roomCode];
-      console.log(`Room ${roomCode} cleaned up - was empty for 30+ seconds`);
+      console.log(`Room ${roomCode} cleaned up - was empty for 2+ minutes with no disconnected players`);
     } else {
-      console.log(`Room ${roomCode} not cleaned up - still too new (${Math.round(roomAge/1000)}s old)`);
+      console.log(`Room ${roomCode} not cleaned up - age: ${Math.round(roomAge/1000)}s, has disconnected players: ${hasDisconnectedPlayers}`);
     }
   }
 }
@@ -81,10 +85,46 @@ function listActiveRooms() {
   console.log("==================");
 }
 
+// Handle player reconnection
+function handleReconnection(socket) {
+  const disconnectedPlayer = disconnectedPlayers[socket.id];
+  if (disconnectedPlayer) {
+    const { roomCode, playerData } = disconnectedPlayer;
+    if (rooms[roomCode]) {
+      // Restore player to their room
+      rooms[roomCode].players[socket.id] = playerData;
+      playerRooms[socket.id] = roomCode;
+      socket.join(roomCode);
+      
+      console.log(`Player ${socket.id} reconnected to room ${roomCode} as ${playerData.isHost ? 'host' : 'guest'}`);
+      
+      // Notify about rejoining
+      if (playerData.isHost) {
+        socket.emit("roomCreated", { roomCode });
+      } else {
+        socket.emit("roomJoined", { roomCode });
+      }
+      
+      // Send updated player list
+      io.to(roomCode).emit("playerUpdate", Object.values(rooms[roomCode].players));
+      
+      // Clear from disconnected players
+      delete disconnectedPlayers[socket.id];
+      return true;
+    }
+  }
+  return false;
+}
+
 io.on("connection", (socket) => {
   console.log("Player connected:", socket.id);
 
-  console.log("Player connected:", socket.id);
+  // Check if this is a reconnection
+  const wasReconnected = handleReconnection(socket);
+  if (wasReconnected) {
+    console.log("Player successfully reconnected");
+    return; // Skip normal connection setup since player was restored
+  }
 
   // Handle room creation
   socket.on("createRoom", () => {
@@ -239,18 +279,40 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("disconnect", () => {
-    console.log("Player disconnected:", socket.id);
+  socket.on("disconnect", (reason) => {
+    console.log("Player disconnected:", socket.id, "Reason:", reason);
     const roomCode = playerRooms[socket.id];
     
     if (roomCode && rooms[roomCode]) {
+      const playerData = rooms[roomCode].players[socket.id];
+      
+      if (playerData) {
+        // Store disconnected player data for potential reconnection
+        disconnectedPlayers[socket.id] = {
+          roomCode,
+          playerData: { ...playerData },
+          disconnectedAt: Date.now()
+        };
+        
+        console.log(`Stored disconnected ${playerData.isHost ? 'host' : 'guest'} ${socket.id} for potential reconnection`);
+      }
+      
+      // Remove from active players but keep room alive
       delete rooms[roomCode].players[socket.id];
       io.to(roomCode).emit("playerUpdate", Object.values(rooms[roomCode].players));
       
-      // Only clean up room after a delay to prevent race conditions
+      // Clean up disconnected players after 5 minutes
+      setTimeout(() => {
+        if (disconnectedPlayers[socket.id]) {
+          console.log(`Removing disconnected player ${socket.id} from reconnection queue`);
+          delete disconnectedPlayers[socket.id];
+        }
+      }, 300000); // 5 minutes
+      
+      // Only clean up room after a delay to allow for reconnection
       setTimeout(() => {
         cleanupRoom(roomCode);
-      }, 5000); // 5 second delay before cleanup
+      }, 10000); // 10 second delay before cleanup
     }
     
     delete playerRooms[socket.id];
