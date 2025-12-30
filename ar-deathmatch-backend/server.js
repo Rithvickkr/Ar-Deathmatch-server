@@ -104,14 +104,12 @@ io.on("connection", (socket) => {
       isHost: true 
     };
     playerRooms[socket.id] = roomCode;
+    socket.join(roomCode);
     
-    // Join room and then emit updates
-    socket.join(roomCode, () => {
-      console.log(`Room ${roomCode} created by ${socket.id}`);
-      listActiveRooms(); // Debug: show all active rooms
-      socket.emit("roomCreated", { roomCode });
-      socket.emit("playerUpdate", Object.values(rooms[roomCode].players));
-    });
+    console.log(`Room ${roomCode} created by ${socket.id}`);
+    listActiveRooms(); // Debug: show all active rooms
+    socket.emit("roomCreated", { roomCode });
+    socket.emit("playerUpdate", Object.values(rooms[roomCode].players));
   });
 
   // Handle room joining
@@ -142,15 +140,12 @@ io.on("connection", (socket) => {
       isHost: false 
     };
     playerRooms[socket.id] = roomCode;
+    socket.join(roomCode);
     
-    // Join room and then emit updates
-    socket.join(roomCode, () => {
-      console.log(`Player ${socket.id} successfully joined room ${roomCode}`);
-      listActiveRooms(); // Debug: show all active rooms after join
-      socket.emit("roomJoined", { roomCode });
-      // Emit to all players in the room including the one who just joined
-      io.to(roomCode).emit("playerUpdate", Object.values(room.players));
-    });
+    console.log(`Player ${socket.id} successfully joined room ${roomCode}`);
+    listActiveRooms(); // Debug: show all active rooms after join
+    socket.emit("roomJoined", { roomCode });
+    io.to(roomCode).emit("playerUpdate", Object.values(room.players));
   });
 
   socket.on("joinGame", () => {
