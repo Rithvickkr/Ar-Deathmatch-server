@@ -16,6 +16,24 @@ const io = new Server(httpServer, {
   cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
 });
 
+app.get("/rooms", (req, res) => {
+  const roomList = Object.keys(rooms).map(code => ({
+    code,
+    playerCount: Object.keys(rooms[code].players).length,
+    createdAt: new Date(rooms[code].createdAt).toISOString(),
+    players: Object.values(rooms[code].players).map(p => ({
+      id: p.id.slice(0, 8),
+      isHost: p.isHost,
+      ready: p.ready
+    }))
+  }));
+  
+  res.json({
+    totalRooms: roomList.length,
+    rooms: roomList
+  });
+});
+
 app.get("/", (req, res) => {
   res.send("🟢 backend is alive!");
 });
@@ -36,12 +54,31 @@ function generateRoomCode() {
   return code;
 }
 
-// Clean up empty rooms
+// Clean up empty rooms with more conservative approach
 function cleanupRoom(roomCode) {
   if (rooms[roomCode] && Object.keys(rooms[roomCode].players).length === 0) {
-    delete rooms[roomCode];
-    console.log(`Room ${roomCode} cleaned up`);
+    // Only clean up rooms that are older than 30 seconds and empty
+    const roomAge = Date.now() - rooms[roomCode].createdAt;
+    if (roomAge > 30000) { // 30 seconds
+      delete rooms[roomCode];
+      console.log(`Room ${roomCode} cleaned up - was empty for 30+ seconds`);
+    } else {
+      console.log(`Room ${roomCode} not cleaned up - still too new (${Math.round(roomAge/1000)}s old)`);
+    }
   }
+}
+
+// Debug function to list all active rooms
+function listActiveRooms() {
+  console.log("=== Active Rooms ===");
+  Object.keys(rooms).forEach(code => {
+    const room = rooms[code];
+    console.log(`Room ${code}: ${Object.keys(room.players).length} players`);
+    Object.values(room.players).forEach(player => {
+      console.log(`  - ${player.id} (${player.isHost ? 'Host' : 'Guest'})`);
+    });
+  });
+  console.log("==================");
 }
 
 io.on("connection", (socket) => {
@@ -70,6 +107,7 @@ io.on("connection", (socket) => {
     socket.join(roomCode);
     
     console.log(`Room ${roomCode} created by ${socket.id}`);
+    listActiveRooms(); // Debug: show all active rooms
     socket.emit("roomCreated", { roomCode });
     socket.emit("playerUpdate", Object.values(rooms[roomCode].players));
   });
@@ -77,8 +115,11 @@ io.on("connection", (socket) => {
   // Handle room joining
   socket.on("joinRoom", ({ roomCode }) => {
     console.log(`Player ${socket.id} attempting to join room ${roomCode}`);
+    listActiveRooms(); // Debug: show all active rooms before join attempt
     
     if (!roomCode || !rooms[roomCode]) {
+      console.log(`Join failed: Room ${roomCode} not found`);
+      console.log("Available rooms:", Object.keys(rooms));
       socket.emit("joinError", { message: "Room not found" });
       return;
     }
@@ -86,6 +127,7 @@ io.on("connection", (socket) => {
     const room = rooms[roomCode];
     
     if (Object.keys(room.players).length >= 2) {
+      console.log(`Join failed: Room ${roomCode} is full`);
       socket.emit("joinError", { message: "Room is full" });
       return;
     }
@@ -100,7 +142,8 @@ io.on("connection", (socket) => {
     playerRooms[socket.id] = roomCode;
     socket.join(roomCode);
     
-    console.log(`Player ${socket.id} joined room ${roomCode}`);
+    console.log(`Player ${socket.id} successfully joined room ${roomCode}`);
+    listActiveRooms(); // Debug: show all active rooms after join
     socket.emit("roomJoined", { roomCode });
     io.to(roomCode).emit("playerUpdate", Object.values(room.players));
   });
@@ -192,11 +235,28 @@ io.on("connection", (socket) => {
       delete rooms[roomCode].players[socket.id];
       io.to(roomCode).emit("playerUpdate", Object.values(rooms[roomCode].players));
       
-      // Clean up empty room
-      cleanupRoom(roomCode);
+      // Only clean up room after a delay to prevent race conditions
+      setTimeout(() => {
+        cleanupRoom(roomCode);
+      }, 5000); // 5 second delay before cleanup
     }
     
     delete playerRooms[socket.id];
+    listActiveRooms(); // Debug: show active rooms after disconnect
+  });
+
+  // Debug endpoint to get room info
+  socket.on("getRoomInfo", ({ roomCode }) => {
+    console.log(`Room info request for: ${roomCode}`);
+    if (rooms[roomCode]) {
+      socket.emit("roomInfo", {
+        code: roomCode,
+        players: Object.values(rooms[roomCode].players),
+        createdAt: rooms[roomCode].createdAt
+      });
+    } else {
+      socket.emit("roomInfo", { error: "Room not found" });
+    }
   });
 });
 
