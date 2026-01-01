@@ -163,10 +163,15 @@ function handleReconnection(socket) {
       console.log(`Joining socket ${socket.id} to room ${roomCode}`);
       socket.join(roomCode);
       
-      // Notify about rejoining
+      // CRITICAL FIX: Set up event handlers BEFORE sending events!
+      setupSocketEventHandlers(socket);
+      
+      // Notify about rejoining - now handlers are ready to receive
       if (playerData.isHost) {
+        console.log(`Sending roomCreated event to reconnected host`);
         socket.emit("roomCreated", { roomCode });
       } else {
+        console.log(`Sending roomJoined event to reconnected guest`);
         socket.emit("roomJoined", { roomCode });
       }
       
@@ -175,9 +180,6 @@ function handleReconnection(socket) {
       console.log(`Sending playerUpdate after reconnection with ${playersData.length} players`);
       console.log(`Room ${roomCode} sockets:`, Array.from(io.sockets.adapter.rooms.get(roomCode) || []));
       io.to(roomCode).emit("playerUpdate", playersData);
-      
-      // CRITICAL FIX: Set up event handlers for the reconnected socket!
-      setupSocketEventHandlers(socket);
       
       // Clear from disconnected players
       delete disconnectedPlayers[oldSocketId];
