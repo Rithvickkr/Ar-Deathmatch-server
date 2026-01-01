@@ -9,8 +9,9 @@ const allowedOrigins = [
   "http://172.25.32.1:3000",
   "https://ar-deathmatch-frontend.vercel.app",
   "https://ar-deathmatch-frontend-rithvickkrs-projects.vercel.app",
+  "*"
 ];
-app.use(cors({ origin: allowedOrigins, methods: ["GET", "POST"] }));
+app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
   cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
