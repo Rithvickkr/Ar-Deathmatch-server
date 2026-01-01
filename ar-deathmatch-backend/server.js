@@ -130,9 +130,6 @@ function syncPlayerRoomMappings() {
   console.log("=== Sync Complete ===");
 }
 
-// Setup all socket event handlers - called for both new connections and reconnections
-function setupSocketEventHandlers(socket) {
-
 // Handle player reconnection
 function handleReconnection(socket) {
   // Check if any disconnected player matches this socket by looking for the same session
@@ -209,7 +206,7 @@ io.on("connection", (socket) => {
   
   // Set up all socket event handlers for new connections
   setupSocketEventHandlers(socket);
-}
+});
 
 // Setup all socket event handlers - called for both new connections and reconnections  
 function setupSocketEventHandlers(socket) {
@@ -858,27 +855,6 @@ function setupSocketEventHandlers(socket) {
     }
   });
 }
-
-io.on("connection", (socket) => {
-  console.log("Player connected:", socket.id);
-  
-  // Debug: Show current playerRooms state
-  console.log("Current playerRooms:", playerRooms);
-  console.log("Current disconnectedPlayers:", Object.keys(disconnectedPlayers));
-
-  // Check if this is a reconnection
-  const wasReconnected = handleReconnection(socket);
-  if (wasReconnected) {
-    console.log("Player successfully reconnected");
-    syncPlayerRoomMappings(); // Ensure mappings are correct after reconnection
-    return; // Skip normal connection setup since player was restored
-  }
-
-  console.log("New connection - no reconnection match found");
-  
-  // Set up all socket event handlers for new connections
-  setupSocketEventHandlers(socket);
-});
 
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
