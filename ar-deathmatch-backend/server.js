@@ -563,7 +563,14 @@ io.on("connection", (socket) => {
       // Reset ready states
       Object.values(room.players).forEach(p => p.ready = false);
       
-      io.to(roomCode).emit("gameOver", { winner: actualShooterId });
+      // Get winner's role for frontend to determine victory/defeat
+      const winnerRole = room.players[actualShooterId] ? room.players[actualShooterId].isHost : null;
+      console.log(`Winner ${actualShooterId} is host: ${winnerRole}`);
+      
+      io.to(roomCode).emit("gameOver", { 
+        winner: actualShooterId, 
+        winnerIsHost: winnerRole 
+      });
     }
     
     // Send updated player data
@@ -572,14 +579,54 @@ io.on("connection", (socket) => {
     io.to(roomCode).emit("playerUpdate", playersData);
   });
 
+  socket.on("leaveRoom", () => {
+    console.log(`Player ${socket.id} intentionally leaving room`);
+    const roomCode = playerRooms[socket.id];
+    
+    if (roomCode && rooms[roomCode]) {
+      console.log(`Removing player ${socket.id} from room ${roomCode}`);
+      
+      // Remove from active players
+      delete rooms[roomCode].players[socket.id];
+      
+      // Remove from player rooms mapping  
+      delete playerRooms[socket.id];
+      
+      // Remove from disconnected players to prevent reconnection
+      delete disconnectedPlayers[socket.id];
+      
+      // Leave the socket room
+      socket.leave(roomCode);
+      
+      // Notify remaining players
+      const remainingPlayers = Object.values(rooms[roomCode].players);
+      if (remainingPlayers.length > 0) {
+        io.to(roomCode).emit("playerUpdate", remainingPlayers);
+      }
+      
+      // Clean up empty room
+      setTimeout(() => {
+        cleanupRoom(roomCode);
+      }, 1000);
+      
+      console.log(`Player ${socket.id} successfully left room ${roomCode}`);
+    }
+  });
+
   socket.on("resetGame", () => {
     console.log("Resetting game...");
     const roomCode = playerRooms[socket.id];
     if (roomCode && rooms[roomCode]) {
+      // Reset player health and ready states
       for (const id in rooms[roomCode].players) {
         rooms[roomCode].players[id].health = 100;
         rooms[roomCode].players[id].ready = false;
       }
+      
+      // Reset game state back to waiting
+      rooms[roomCode].gameState = "waiting";
+      
+      console.log("Game reset complete, sending player update");
       io.to(roomCode).emit("playerUpdate", Object.values(rooms[roomCode].players));
     }
   });
