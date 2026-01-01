@@ -87,16 +87,26 @@ function listActiveRooms() {
 
 // Handle player reconnection
 function handleReconnection(socket) {
-  const disconnectedPlayer = disconnectedPlayers[socket.id];
-  if (disconnectedPlayer) {
+  // Check if any disconnected player matches this socket by looking for the same session
+  const potentialMatch = Object.entries(disconnectedPlayers).find(([oldId, data]) => {
+    // For development with hot reload, we can't reliably match socket IDs
+    // So let's check if there's a recent disconnection in the same room
+    return Date.now() - data.disconnectedAt < 60000; // Within 1 minute
+  });
+  
+  if (potentialMatch) {
+    const [oldSocketId, disconnectedPlayer] = potentialMatch;
     const { roomCode, playerData } = disconnectedPlayer;
+    
     if (rooms[roomCode]) {
-      // Restore player to their room
-      rooms[roomCode].players[socket.id] = playerData;
+      // Update the player ID to the new socket ID
+      const updatedPlayerData = { ...playerData, id: socket.id };
+      rooms[roomCode].players[socket.id] = updatedPlayerData;
       playerRooms[socket.id] = roomCode;
-      socket.join(roomCode);
       
-      console.log(`Player ${socket.id} reconnected to room ${roomCode} as ${playerData.isHost ? 'host' : 'guest'}`);
+      console.log(`Player reconnected: old ID ${oldSocketId} -> new ID ${socket.id} in room ${roomCode} as ${playerData.isHost ? 'host' : 'guest'}`);
+      console.log(`Joining socket ${socket.id} to room ${roomCode}`);
+      socket.join(roomCode);
       
       // Notify about rejoining
       if (playerData.isHost) {
@@ -106,10 +116,13 @@ function handleReconnection(socket) {
       }
       
       // Send updated player list
-      io.to(roomCode).emit("playerUpdate", Object.values(rooms[roomCode].players));
+      const playersData = Object.values(rooms[roomCode].players);
+      console.log(`Sending playerUpdate after reconnection with ${playersData.length} players`);
+      console.log(`Room ${roomCode} sockets:`, Array.from(io.sockets.adapter.rooms.get(roomCode) || []));
+      io.to(roomCode).emit("playerUpdate", playersData);
       
       // Clear from disconnected players
-      delete disconnectedPlayers[socket.id];
+      delete disconnectedPlayers[oldSocketId];
       return true;
     }
   }
@@ -118,6 +131,10 @@ function handleReconnection(socket) {
 
 io.on("connection", (socket) => {
   console.log("Player connected:", socket.id);
+  
+  // Debug: Show current playerRooms state
+  console.log("Current playerRooms:", playerRooms);
+  console.log("Current disconnectedPlayers:", Object.keys(disconnectedPlayers));
 
   // Check if this is a reconnection
   const wasReconnected = handleReconnection(socket);
@@ -125,6 +142,8 @@ io.on("connection", (socket) => {
     console.log("Player successfully reconnected");
     return; // Skip normal connection setup since player was restored
   }
+
+  console.log("New connection - no reconnection match found");
 
   // Handle room creation
   socket.on("createRoom", () => {
@@ -231,40 +250,326 @@ io.on("connection", (socket) => {
     io.to(defaultRoom).emit("playerUpdate", playerList);
   });
 
-  socket.on("setReady", ({ playerId, ready }) => {
-    console.log(`Player ${playerId} set ready: ${ready}`);
-    const roomCode = playerRooms[playerId];
-    if (roomCode && rooms[roomCode] && rooms[roomCode].players[playerId]) {
-      rooms[roomCode].players[playerId].ready = ready;
-      const playerList = Object.values(rooms[roomCode].players);
-      io.to(roomCode).emit("playerUpdate", playerList);
+  socket.on("setReady", ({ playerId, ready, isHost }) => {
+    console.log(`=== setReady event received ===`);
+    console.log(`Player ID: ${playerId}`);
+    console.log(`Ready state: ${ready}`);
+    console.log(`Is Host: ${isHost}`);
+    console.log(`Socket ID: ${socket.id}`);
+    
+    // Use the current socket ID for operations since that's who's actually making the request
+    const actualSocketId = socket.id;
+    let roomCode = playerRooms[actualSocketId];
+    
+    console.log(`Initial room code lookup: ${roomCode}`);
+    console.log(`playerRooms mapping:`, playerRooms);
+    
+    // If no room mapping found for current socket, try multiple approaches to find it
+    if (!roomCode) {
+      console.log(`No room mapping found for socket ${actualSocketId}, searching...`);
+      
+      // Method 1: Check if socket is already in any room
+      for (const [code, room] of Object.entries(rooms)) {
+        const socketsInRoom = Array.from(io.sockets.adapter.rooms.get(code) || []);
+        console.log(`Room ${code} has sockets:`, socketsInRoom);
+        if (socketsInRoom.includes(actualSocketId)) {
+          roomCode = code;
+          playerRooms[actualSocketId] = roomCode;
+          console.log(`Method 1: Found socket ${actualSocketId} in room ${roomCode}, updated mapping`);
+          break;
+        }
+      }
+      
+      // Method 2: If still not found, look for a room with a player matching the host status
+      if (!roomCode) {
+        console.log(`Method 1 failed, trying method 2...`);
+        for (const [code, room] of Object.entries(rooms)) {
+          const playersWithSameHostStatus = Object.values(room.players).filter(p => p.isHost === isHost);
+          console.log(`Room ${code} has ${playersWithSameHostStatus.length} players with host status ${isHost}`);
+          if (playersWithSameHostStatus.length === 1) {
+            roomCode = code;
+            playerRooms[actualSocketId] = roomCode;
+            socket.join(roomCode);
+            console.log(`Method 2: Assigned socket ${actualSocketId} to room ${roomCode} based on host status`);
+            break;
+          }
+        }
+      }
+      
+      // Method 3: If still not found, use any existing room mapping and update it
+      if (!roomCode) {
+        console.log(`Method 2 failed, trying method 3...`);
+        const existingMappings = Object.entries(playerRooms);
+        if (existingMappings.length > 0) {
+          const [oldSocketId, existingRoomCode] = existingMappings[0];
+          if (rooms[existingRoomCode]) {
+            roomCode = existingRoomCode;
+            playerRooms[actualSocketId] = roomCode;
+            socket.join(roomCode);
+            console.log(`Method 3: Reassigned socket ${actualSocketId} to room ${roomCode} from old mapping ${oldSocketId}`);
+          }
+        }
+      }
+    }
+    
+    console.log(`Final room code: ${roomCode}`);
+    
+    if (roomCode && rooms[roomCode]) {
+      // Find the player record that matches the host status
+      let targetPlayerId = null;
+      for (const [pid, player] of Object.entries(rooms[roomCode].players)) {
+        if (player.isHost === isHost) {
+          targetPlayerId = pid;
+          break;
+        }
+      }
+      
+      console.log(`Target player ID: ${targetPlayerId}`);
+      console.log(`Available players:`, Object.keys(rooms[roomCode].players));
+      
+      if (targetPlayerId && rooms[roomCode].players[targetPlayerId]) {
+        console.log(`Found target player ${targetPlayerId} with host status: ${isHost}`);
+        
+        // If this is a different socket ID, update the player record
+        if (targetPlayerId !== actualSocketId) {
+          console.log(`Updating player record from ${targetPlayerId} to ${actualSocketId}`);
+          const playerData = rooms[roomCode].players[targetPlayerId];
+          delete rooms[roomCode].players[targetPlayerId];
+          rooms[roomCode].players[actualSocketId] = { ...playerData, id: actualSocketId };
+          
+          // Clean up old mapping
+          delete playerRooms[targetPlayerId];
+          playerRooms[actualSocketId] = roomCode;
+        }
+        
+        // Ensure socket is in the room
+        socket.join(roomCode);
+        
+        console.log(`Setting player ${actualSocketId} ready state to: ${ready}`);
+        rooms[roomCode].players[actualSocketId].ready = ready;
+        const playerList = Object.values(rooms[roomCode].players);
+        console.log(`Updated player list:`, playerList.map(p => ({ id: p.id.slice(0, 8), ready: p.ready, isHost: p.isHost })));
+        
+        console.log(`Room ${roomCode} sockets before emit:`, Array.from(io.sockets.adapter.rooms.get(roomCode) || []));
+        io.to(roomCode).emit("playerUpdate", playerList);
+        console.log(`Sent playerUpdate to room ${roomCode}`);
+      } else {
+        console.log(`Failed to find player with host status: ${isHost} in room ${roomCode}`);
+        console.log(`Available players:`, Object.values(rooms[roomCode].players).map(p => ({ id: p.id, isHost: p.isHost })));
+      }
+    } else {
+      console.log(`Failed to set ready - room: ${roomCode}, roomExists: ${!!rooms[roomCode]}`);
+      console.log(`Available rooms:`, Object.keys(rooms));
     }
   });
 
   socket.on("shoot", ({ shooterId, damage }) => {
     console.log("Shoot received:", { shooterId, damage });
-    const roomCode = playerRooms[shooterId];
-    if (!roomCode || !rooms[roomCode]) return;
+    console.log(`Actual sender socket ID: ${socket.id}`);
+    
+    const actualShooterId = socket.id;
+    
+    // Try to find room via playerRooms mapping
+    let roomCode = playerRooms[actualShooterId];
+    console.log(`Shooter ${actualShooterId} room code: ${roomCode}`);
+    
+    // If not found, this is a hot reload case - find any active room and join
+    if (!roomCode) {
+      console.log(`🔧 Hot reload detected - finding any active room for shooter`);
+      
+      // Find the first room with players in "ready" or "playing" state
+      for (const [code, room] of Object.entries(rooms)) {
+        const playerIds = Object.keys(room.players);
+        
+        if (playerIds.length > 0) {
+          console.log(`🎯 Found active room ${code} with ${playerIds.length} players`);
+          
+          // Check if this socket is already one of the players (different ID due to hot reload)
+          // Find the current frontend session by checking socket rooms that aren't the socket ID itself
+          const shooterRooms = Array.from(socket.rooms).filter(r => r !== actualShooterId);
+          console.log(`Shooter is in rooms: ${shooterRooms}`);
+          
+          // If the shooter is in this room via socket rooms, update the mapping
+          if (shooterRooms.includes(code)) {
+            roomCode = code;
+            playerRooms[actualShooterId] = roomCode;
+            console.log(`✅ Updated playerRooms mapping for existing room member`);
+            break;
+          }
+          
+          // If no existing room membership but this is the only/main active room,
+          // treat the shooter as one of the existing players (hot reload scenario)
+          if (!roomCode && playerIds.length <= 2) {
+            roomCode = code;
+            playerRooms[actualShooterId] = roomCode;
+            
+            // Ensure socket is in the room
+            if (!socket.rooms.has(code)) {
+              socket.join(code);
+              console.log(`🚪 Joined socket ${actualShooterId} to room ${code}`);
+            }
+            
+            console.log(`✅ Assigned shooter to active room ${code}`);
+            break;
+          }
+        }
+      }
+    }
+    
+    if (!roomCode || !rooms[roomCode]) {
+      console.log(`❌ Still no room found for shooter ${actualShooterId}`);
+      console.log(`Available rooms:`, Object.keys(rooms));
+      return;
+    }
     
     const room = rooms[roomCode];
-    const targetId = Object.keys(room.players).find((id) => id !== shooterId);
+    console.log(`✅ Using room ${roomCode} for shooting`);
+    console.log(`All players in room:`, Object.keys(room.players));
+    console.log(`Shooter socket ID: ${actualShooterId}`);
     
-    if (targetId && room.players[targetId].health > 0) {
-      room.players[targetId].health -= damage;
-      console.log(`Player ${shooterId} shot ${targetId} for ${damage} damage in room ${roomCode}`);
+    // Check if the shooter is actually one of the existing players (hot reload case)
+    let shooterPlayerRecord = null;
+    let targetPlayerRecord = null;
+    
+    const connectedSockets = Array.from(io.sockets.adapter.rooms.get(roomCode) || []);
+    console.log(`Connected sockets in room: ${connectedSockets}`);
+    
+    // If shooter socket is in the room but not in player records, 
+    // they must be a hot-reloaded version of one of the existing players
+    if (connectedSockets.includes(actualShooterId) && !room.players[actualShooterId]) {
+      console.log(`🔄 Shooter is hot-reloaded version - finding their original player record`);
       
-      if (room.players[targetId].health <= 0) {
-        console.log(`Player ${targetId} is dead!`);
-        // Reset ready status for next game
-        for (const id in room.players) {
-          room.players[id].ready = false;
+      // Check if any existing player IDs are NOT in the connected sockets (disconnected)
+      const playerIds = Object.keys(room.players);
+      const disconnectedPlayerIds = playerIds.filter(id => !connectedSockets.includes(id));
+      
+      console.log(`Disconnected player IDs: ${disconnectedPlayerIds}`);
+      
+      // If no clear disconnected players, but we have more sockets than players,
+      // this means hot reload created new sockets. Assign the shooter to the first player
+      if (disconnectedPlayerIds.length === 0 && connectedSockets.length > playerIds.length) {
+        console.log(`🔧 Hot reload detected: more sockets than players, assigning shooter to host player`);
+        
+        // Find the host player (assuming this is the original creator who's been hot reloading)
+        const hostPlayer = Object.values(room.players).find(p => p.isHost);
+        if (hostPlayer) {
+          console.log(`📝 Assigning shooter ${actualShooterId} as host player (replacing ${hostPlayer.id})`);
+          
+          // Replace host player with new shooter socket
+          delete room.players[hostPlayer.id];
+          room.players[actualShooterId] = { ...hostPlayer, id: actualShooterId };
+          
+          // Clean up old playerRooms mapping
+          if (playerRooms[hostPlayer.id]) {
+            delete playerRooms[hostPlayer.id];
+          }
+          
+          console.log(`✅ Updated player records - shooter is now host`);
+          
+          // Send updated player list
+          const playersData = Object.values(room.players);
+          io.to(roomCode).emit("playerUpdate", playersData);
         }
-        io.to(roomCode).emit("gameOver", { winner: shooterId });
+      } else if (disconnectedPlayerIds.length > 0) {
+        // Replace the disconnected player with the new shooter
+        const oldPlayerId = disconnectedPlayerIds[0];
+        shooterPlayerRecord = room.players[oldPlayerId];
+        
+        console.log(`📝 Replacing ${oldPlayerId} with ${actualShooterId}`);
+        
+        // Transfer player data to new ID
+        delete room.players[oldPlayerId];
+        room.players[actualShooterId] = { ...shooterPlayerRecord, id: actualShooterId };
+        
+        // Clean up old playerRooms mapping
+        if (playerRooms[oldPlayerId]) {
+          delete playerRooms[oldPlayerId];
+        }
+        
+        console.log(`✅ Updated player records`);
+        
+        // Send updated player list
+        const playersData = Object.values(room.players);
+        io.to(roomCode).emit("playerUpdate", playersData);
       }
-      io.to(roomCode).emit("playerUpdate", Object.values(room.players));
-    } else {
-      console.log("No valid target or target already dead");
     }
+    
+    // Now find the target (the other player that's NOT the shooter)
+    const allPlayerIds = Object.keys(room.players);
+    console.log(`All players in room after processing: ${allPlayerIds}`);
+    console.log(`Shooter ID: ${actualShooterId}`);
+    
+    // Filter out the shooter to get potential targets
+    const potentialTargets = allPlayerIds.filter(id => id !== actualShooterId);
+    console.log(`Potential targets: ${potentialTargets}`);
+    
+    if (potentialTargets.length === 0) {
+      console.log(`❌ No other players found to target`);
+      return;
+    }
+    
+    const targetId = potentialTargets[0]; // Take the first (and should be only) other player
+    
+    if (!targetId || !room.players[targetId]) {
+      console.log(`❌ No valid target found in room ${roomCode}`);
+      console.log(`Players in room after update:`, Object.keys(room.players));
+      console.log(`Shooter ID: ${actualShooterId}`);
+      return;
+    }
+    
+    console.log(`🎯 Target identified: ${targetId}`);
+    console.log(`🎯 Target isHost: ${room.players[targetId].isHost}, health: ${room.players[targetId].health}`);
+    console.log(`👤 Shooter isHost: ${room.players[actualShooterId] ? room.players[actualShooterId].isHost : 'unknown'}, health: ${room.players[actualShooterId] ? room.players[actualShooterId].health : 'unknown'}`);
+    
+    // Additional safety check: make sure we're not targeting ourselves
+    if (targetId === actualShooterId) {
+      console.log(`❌ ERROR: Target is same as shooter! This would be self-damage.`);
+      console.log(`Shooter: ${actualShooterId}`);
+      console.log(`Target: ${targetId}`);
+      return;
+    }
+    
+    // Verify players have different roles (one should be host, one guest)
+    if (room.players[actualShooterId] && room.players[targetId]) {
+      const shooterIsHost = room.players[actualShooterId].isHost;
+      const targetIsHost = room.players[targetId].isHost;
+      
+      console.log(`🔍 Role check - Shooter isHost: ${shooterIsHost}, Target isHost: ${targetIsHost}`);
+      
+      if (shooterIsHost === targetIsHost) {
+        console.log(`⚠️ WARNING: Both players have same host status (${shooterIsHost})`);
+        // Don't return here - still allow the shot for now, but log the issue
+      } else {
+        console.log(`✅ Confirmed: Shooter (host: ${shooterIsHost}) targeting enemy (host: ${targetIsHost})`);
+      }
+    }
+    
+    if (room.players[targetId].health <= 0) {
+      console.log(`❌ Target ${targetId} is already dead`);
+      return;
+    }
+    
+    console.log(`💥 Applying ${damage} damage to ${targetId} (current health: ${room.players[targetId].health})`);
+    
+    room.players[targetId].health = Math.max(0, room.players[targetId].health - damage);
+    
+    console.log(`🩺 Target health after damage: ${room.players[targetId].health}`);
+    
+    // Check game over
+    if (room.players[targetId].health <= 0) {
+      console.log(`🏁 Game over! ${targetId} eliminated by ${actualShooterId}`);
+      room.gameState = "ended";
+      
+      // Reset ready states
+      Object.values(room.players).forEach(p => p.ready = false);
+      
+      io.to(roomCode).emit("gameOver", { winner: actualShooterId });
+    }
+    
+    // Send updated player data
+    const playersData = Object.values(room.players);
+    console.log(`📡 Sending health update:`, playersData.map(p => ({ id: p.id, health: p.health })));
+    io.to(roomCode).emit("playerUpdate", playersData);
   });
 
   socket.on("resetGame", () => {
