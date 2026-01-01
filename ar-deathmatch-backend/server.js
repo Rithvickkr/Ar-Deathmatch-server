@@ -42,8 +42,18 @@ app.get("/rooms", (req, res) => {
   
   res.json({
     totalRooms: roomList.length,
-    rooms: roomList
+    rooms: roomList,
+    playerRoomMappings: Object.entries(playerRooms).reduce((acc, [socketId, roomCode]) => {
+      acc[socketId.slice(0, 8)] = roomCode;
+      return acc;
+    }, {}),
+    disconnectedPlayers: Object.keys(disconnectedPlayers).length
   });
+});
+
+app.get("/debug/sync", (req, res) => {
+  syncPlayerRoomMappings();
+  res.json({ message: "PlayerRooms mappings synced", playerRooms });
 });
 
 app.get("/", (req, res) => {
@@ -97,6 +107,29 @@ function listActiveRooms() {
   console.log("==================");
 }
 
+// Sync playerRooms mapping with actual room data
+function syncPlayerRoomMappings() {
+  console.log("=== Syncing PlayerRooms Mappings ===");
+  
+  // Clear all existing mappings
+  const oldMappings = { ...playerRooms };
+  for (const socketId in playerRooms) {
+    delete playerRooms[socketId];
+  }
+  
+  // Rebuild from actual room data
+  for (const [roomCode, room] of Object.entries(rooms)) {
+    for (const [playerId, player] of Object.entries(room.players)) {
+      playerRooms[playerId] = roomCode;
+      console.log(`Mapped ${playerId} -> ${roomCode}`);
+    }
+  }
+  
+  console.log("Old mappings:", oldMappings);
+  console.log("New mappings:", playerRooms);
+  console.log("=== Sync Complete ===");
+}
+
 // Handle player reconnection
 function handleReconnection(socket) {
   // Check if any disconnected player matches this socket by looking for the same session
@@ -111,12 +144,22 @@ function handleReconnection(socket) {
     const { roomCode, playerData } = disconnectedPlayer;
     
     if (rooms[roomCode]) {
+      // Remove the old player record first
+      delete rooms[roomCode].players[oldSocketId];
+      
       // Update the player ID to the new socket ID
       const updatedPlayerData = { ...playerData, id: socket.id };
       rooms[roomCode].players[socket.id] = updatedPlayerData;
+      
+      // Update room mapping - this was the missing piece!
       playerRooms[socket.id] = roomCode;
       
+      // Clean up old room mapping if it exists
+      delete playerRooms[oldSocketId];
+      
       console.log(`Player reconnected: old ID ${oldSocketId} -> new ID ${socket.id} in room ${roomCode} as ${playerData.isHost ? 'host' : 'guest'}`);
+      console.log(`Updated playerRooms mapping for ${socket.id} -> ${roomCode}`);
+      console.log(`Current playerRooms:`, playerRooms);
       console.log(`Joining socket ${socket.id} to room ${roomCode}`);
       socket.join(roomCode);
       
@@ -152,6 +195,7 @@ io.on("connection", (socket) => {
   const wasReconnected = handleReconnection(socket);
   if (wasReconnected) {
     console.log("Player successfully reconnected");
+    syncPlayerRoomMappings(); // Ensure mappings are correct after reconnection
     return; // Skip normal connection setup since player was restored
   }
 
@@ -374,14 +418,22 @@ io.on("connection", (socket) => {
       delete rooms[roomCode].players[targetPlayerId];
       rooms[roomCode].players[actualSocketId] = { ...playerData, id: actualSocketId };
       
-      // Clean up old mapping
+      // Clean up old mapping and set new mapping - CRITICAL FIX
       delete playerRooms[targetPlayerId];
       playerRooms[actualSocketId] = roomCode;
+      
+      console.log(`Updated playerRooms mapping: ${actualSocketId} -> ${roomCode}`);
+      console.log(`Current playerRooms after update:`, playerRooms);
+      
       targetPlayerId = actualSocketId; // Update the target player ID
     }
     
-    // Ensure socket is in the room
+    // Ensure socket is in the room and playerRooms mapping exists
     socket.join(roomCode);
+    if (!playerRooms[actualSocketId]) {
+      playerRooms[actualSocketId] = roomCode;
+      console.log(`Added missing playerRooms mapping: ${actualSocketId} -> ${roomCode}`);
+    }
     
     console.log(`Setting player ${targetPlayerId} ready state to: ${ready}`);
     const oldReadyState = rooms[roomCode].players[targetPlayerId].ready;
