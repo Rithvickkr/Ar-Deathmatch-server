@@ -614,10 +614,54 @@ io.on("connection", (socket) => {
   });
 
   socket.on("resetGame", () => {
-    console.log("Resetting game...");
-    const roomCode = playerRooms[socket.id];
+    console.log("=== resetGame event received ===");
+    console.log(`Socket ID: ${socket.id}`);
+    
+    const actualSocketId = socket.id;
+    let roomCode = playerRooms[actualSocketId];
+    
+    console.log(`Initial room code lookup: ${roomCode}`);
+    console.log(`playerRooms mapping:`, playerRooms);
+    
+    // If no room mapping found for current socket, try to find it
+    if (!roomCode) {
+      console.log(`No room mapping found for socket ${actualSocketId}, searching...`);
+      
+      // Method 1: Check if socket is already in any room
+      for (const [code, room] of Object.entries(rooms)) {
+        const socketsInRoom = Array.from(io.sockets.adapter.rooms.get(code) || []);
+        console.log(`Room ${code} has sockets:`, socketsInRoom);
+        if (socketsInRoom.includes(actualSocketId)) {
+          roomCode = code;
+          playerRooms[actualSocketId] = roomCode;
+          console.log(`Method 1: Found socket ${actualSocketId} in room ${roomCode}, updated mapping`);
+          break;
+        }
+      }
+      
+      // Method 2: If still not found, use any existing room mapping
+      if (!roomCode) {
+        console.log(`Method 1 failed, trying method 2...`);
+        const existingMappings = Object.entries(playerRooms);
+        if (existingMappings.length > 0) {
+          const [oldSocketId, existingRoomCode] = existingMappings[0];
+          if (rooms[existingRoomCode]) {
+            roomCode = existingRoomCode;
+            playerRooms[actualSocketId] = roomCode;
+            socket.join(roomCode);
+            console.log(`Method 2: Reassigned socket ${actualSocketId} to room ${roomCode} from old mapping ${oldSocketId}`);
+          }
+        }
+      }
+    }
+    
+    console.log(`Final room code: ${roomCode}`);
+    
     if (roomCode && rooms[roomCode]) {
-      // Reset player health and ready states
+      console.log("Resetting game for room:", roomCode);
+      console.log("Players before reset:", Object.values(rooms[roomCode].players).map(p => ({ id: p.id.slice(0, 8), health: p.health, ready: p.ready })));
+      
+      // Reset player health and ready states for ALL players
       for (const id in rooms[roomCode].players) {
         rooms[roomCode].players[id].health = 100;
         rooms[roomCode].players[id].ready = false;
@@ -626,8 +670,14 @@ io.on("connection", (socket) => {
       // Reset game state back to waiting
       rooms[roomCode].gameState = "waiting";
       
+      console.log("Players after reset:", Object.values(rooms[roomCode].players).map(p => ({ id: p.id.slice(0, 8), health: p.health, ready: p.ready })));
       console.log("Game reset complete, sending player update");
-      io.to(roomCode).emit("playerUpdate", Object.values(rooms[roomCode].players));
+      
+      const playersData = Object.values(rooms[roomCode].players);
+      io.to(roomCode).emit("playerUpdate", playersData);
+    } else {
+      console.log(`Failed to reset game - room: ${roomCode}, roomExists: ${!!rooms[roomCode]}`);
+      console.log(`Available rooms:`, Object.keys(rooms));
     }
   });
 
