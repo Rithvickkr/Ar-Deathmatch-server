@@ -328,52 +328,97 @@ io.on("connection", (socket) => {
     
     console.log(`Final room code: ${roomCode}`);
     
-    if (roomCode && rooms[roomCode]) {
-      // Find the player record that matches the host status
-      let targetPlayerId = null;
-      for (const [pid, player] of Object.entries(rooms[roomCode].players)) {
-        if (player.isHost === isHost) {
-          targetPlayerId = pid;
-          break;
-        }
+    if (!roomCode) {
+      console.error(`❌ setReady failed: No room found for socket ${actualSocketId}`);
+      socket.emit("setReadyError", { message: "Room not found" });
+      return;
+    }
+    
+    if (!rooms[roomCode]) {
+      console.error(`❌ setReady failed: Room ${roomCode} does not exist`);
+      socket.emit("setReadyError", { message: "Room does not exist" });
+      return;
+    }
+    
+    // Find the player record that matches the host status
+    let targetPlayerId = null;
+    for (const [pid, player] of Object.entries(rooms[roomCode].players)) {
+      if (player.isHost === isHost) {
+        targetPlayerId = pid;
+        break;
       }
+    }
+    
+    console.log(`Target player ID: ${targetPlayerId}`);
+    console.log(`Available players:`, Object.keys(rooms[roomCode].players));
+    
+    if (!targetPlayerId) {
+      console.error(`❌ setReady failed: No player found with host status ${isHost} in room ${roomCode}`);
+      console.log(`Available players:`, Object.values(rooms[roomCode].players).map(p => ({ id: p.id, isHost: p.isHost })));
+      socket.emit("setReadyError", { message: `Player with host status ${isHost} not found` });
+      return;
+    }
+    
+    if (!rooms[roomCode].players[targetPlayerId]) {
+      console.error(`❌ setReady failed: Player ${targetPlayerId} not found in room ${roomCode}`);
+      socket.emit("setReadyError", { message: "Player not found" });
+      return;
+    }
+    
+    console.log(`Found target player ${targetPlayerId} with host status: ${isHost}`);
+    
+    // If this is a different socket ID, update the player record
+    if (targetPlayerId !== actualSocketId) {
+      console.log(`Updating player record from ${targetPlayerId} to ${actualSocketId}`);
+      const playerData = rooms[roomCode].players[targetPlayerId];
+      delete rooms[roomCode].players[targetPlayerId];
+      rooms[roomCode].players[actualSocketId] = { ...playerData, id: actualSocketId };
       
-      console.log(`Target player ID: ${targetPlayerId}`);
-      console.log(`Available players:`, Object.keys(rooms[roomCode].players));
-      
-      if (targetPlayerId && rooms[roomCode].players[targetPlayerId]) {
-        console.log(`Found target player ${targetPlayerId} with host status: ${isHost}`);
-        
-        // If this is a different socket ID, update the player record
-        if (targetPlayerId !== actualSocketId) {
-          console.log(`Updating player record from ${targetPlayerId} to ${actualSocketId}`);
-          const playerData = rooms[roomCode].players[targetPlayerId];
-          delete rooms[roomCode].players[targetPlayerId];
-          rooms[roomCode].players[actualSocketId] = { ...playerData, id: actualSocketId };
-          
-          // Clean up old mapping
-          delete playerRooms[targetPlayerId];
-          playerRooms[actualSocketId] = roomCode;
-        }
-        
-        // Ensure socket is in the room
-        socket.join(roomCode);
-        
-        console.log(`Setting player ${actualSocketId} ready state to: ${ready}`);
-        rooms[roomCode].players[actualSocketId].ready = ready;
-        const playerList = Object.values(rooms[roomCode].players);
-        console.log(`Updated player list:`, playerList.map(p => ({ id: p.id.slice(0, 8), ready: p.ready, isHost: p.isHost })));
-        
-        console.log(`Room ${roomCode} sockets before emit:`, Array.from(io.sockets.adapter.rooms.get(roomCode) || []));
-        io.to(roomCode).emit("playerUpdate", playerList);
-        console.log(`Sent playerUpdate to room ${roomCode}`);
-      } else {
-        console.log(`Failed to find player with host status: ${isHost} in room ${roomCode}`);
-        console.log(`Available players:`, Object.values(rooms[roomCode].players).map(p => ({ id: p.id, isHost: p.isHost })));
-      }
+      // Clean up old mapping
+      delete playerRooms[targetPlayerId];
+      playerRooms[actualSocketId] = roomCode;
+      targetPlayerId = actualSocketId; // Update the target player ID
+    }
+    
+    // Ensure socket is in the room
+    socket.join(roomCode);
+    
+    console.log(`Setting player ${targetPlayerId} ready state to: ${ready}`);
+    const oldReadyState = rooms[roomCode].players[targetPlayerId].ready;
+    rooms[roomCode].players[targetPlayerId].ready = ready;
+    
+    // Verify the update was successful
+    const newReadyState = rooms[roomCode].players[targetPlayerId].ready;
+    console.log(`Ready state update: ${oldReadyState} → ${newReadyState}`);
+    
+    if (newReadyState !== ready) {
+      console.error(`❌ Failed to update ready state for player ${targetPlayerId}`);
+      socket.emit("setReadyError", { message: "Failed to update ready state" });
+      return;
+    }
+    
+    const playerList = Object.values(rooms[roomCode].players);
+    console.log(`Updated player list:`, playerList.map(p => ({ id: p.id.slice(0, 8), ready: p.ready, isHost: p.isHost })));
+    
+    console.log(`Room ${roomCode} sockets before emit:`, Array.from(io.sockets.adapter.rooms.get(roomCode) || []));
+    
+    // Emit to the room and also directly to the requesting socket
+    io.to(roomCode).emit("playerUpdate", playerList);
+    socket.emit("playerUpdate", playerList); // Ensure the requesting socket gets the update
+    
+    console.log(`✅ Successfully sent playerUpdate to room ${roomCode}`);
+    console.log(`✅ setReady completed successfully for player ${targetPlayerId} (ready: ${ready})`);
+  });
+
+  // Add a heartbeat handler to maintain room mappings
+  socket.on("heartbeat", () => {
+    const roomCode = playerRooms[socket.id];
+    if (roomCode && rooms[roomCode] && rooms[roomCode].players[socket.id]) {
+      console.log(`💓 Heartbeat from ${socket.id} in room ${roomCode}`);
+      socket.emit("heartbeatAck", { roomCode, playerId: socket.id });
     } else {
-      console.log(`Failed to set ready - room: ${roomCode}, roomExists: ${!!rooms[roomCode]}`);
-      console.log(`Available rooms:`, Object.keys(rooms));
+      console.log(`💔 Heartbeat from unmapped socket ${socket.id}`);
+      socket.emit("heartbeatAck", { roomCode: null, playerId: socket.id });
     }
   });
 
