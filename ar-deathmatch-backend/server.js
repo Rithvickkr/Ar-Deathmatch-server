@@ -9,12 +9,23 @@ const allowedOrigins = [
   "http://172.25.32.1:3000",
   "https://ar-deathmatch-frontend.vercel.app",
   "https://ar-deathmatch-frontend-rithvickkrs-projects.vercel.app",
+  /^https:\/\/ar-deathmatch-frontend.*\.vercel\.app$/,
   "*"
 ];
-app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
+app.use(cors({ 
+  origin: true, // Allow all origins for development
+  methods: ["GET", "POST"],
+  credentials: true
+}));
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
+  cors: { 
+    origin: true, // Allow all origins
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ['polling', 'websocket'], // Prioritize polling for Vercel
+  allowEIO3: true
 });
 
 app.get("/rooms", (req, res) => {
@@ -257,6 +268,8 @@ io.on("connection", (socket) => {
     console.log(`Ready state: ${ready}`);
     console.log(`Is Host: ${isHost}`);
     console.log(`Socket ID: ${socket.id}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`Request origin: ${socket.handshake.headers.origin}`);
     
     // Use the current socket ID for operations since that's who's actually making the request
     const actualSocketId = socket.id;
